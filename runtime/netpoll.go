@@ -200,6 +200,7 @@ func poll_runtime_pollWaitCanceled(pd *pollDesc, mode int) {
 	}
 }
 
+// 设置超时，添加到timer管理器里
 //go:linkname poll_runtime_pollSetDeadline internal/poll.runtime_pollSetDeadline
 func poll_runtime_pollSetDeadline(pd *pollDesc, d int64, mode int) {
 	lock(&pd.lock)
@@ -230,14 +231,14 @@ func poll_runtime_pollSetDeadline(pd *pollDesc, d int64, mode int) {
 	}
 	if pd.rt.f == nil {
 		if pd.rd > 0 {
-			pd.rt.f = rtf
+			pd.rt.f = rtf // 设置唤醒时调用的函数
 			pd.rt.when = pd.rd
 			// Copy current seq into the timer arg.
 			// Timer func will check the seq against current descriptor seq,
 			// if they differ the descriptor was reused or timers were reset.
 			pd.rt.arg = pd
 			pd.rt.seq = pd.rseq
-			addtimer(&pd.rt)
+			addtimer(&pd.rt) // 添加到全局timer里
 		}
 	} else if pd.rd != rd0 || combo != combo0 {
 		pd.rseq++ // invalidate current timers
@@ -250,11 +251,11 @@ func poll_runtime_pollSetDeadline(pd *pollDesc, d int64, mode int) {
 	}
 	if pd.wt.f == nil {
 		if pd.wd > 0 && !combo {
-			pd.wt.f = netpollWriteDeadline
+			pd.wt.f = netpollWriteDeadline // 设置唤醒时调用的函数
 			pd.wt.when = pd.wd
 			pd.wt.arg = pd
 			pd.wt.seq = pd.wseq
-			addtimer(&pd.wt)
+			addtimer(&pd.wt) // 添加到全局timer里
 		}
 	} else if pd.wd != wd0 || combo != combo0 {
 		pd.wseq++ // invalidate current timers
