@@ -630,8 +630,8 @@ bucketloop:
 	// 如果找到key了，则直接取出value地址
 	// 如果没有找到key且有空位置，则在对应topHash位置上仅取出insert的kv地址
 	// 如果没有找到key且没有空位置，说明满了，该扩张了，则直接跳出bucketloop循环
-	for {
-		for i := uintptr(0); i < bucketCnt; i++ {
+	for { // 循环遍历同一个bucket下的所有overflow bucket
+		for i := uintptr(0); i < bucketCnt; i++ { // 循环遍历单个overflow bucket下的8个key
 			if b.tophash[i] != top {
 				if isEmpty(b.tophash[i]) && inserti == nil {
 					inserti = &b.tophash[i]
@@ -647,7 +647,7 @@ bucketloop:
 			if t.indirectkey() {
 				k = *((*unsafe.Pointer)(k))
 			}
-			if !alg.equal(key, k) {
+			if !alg.equal(key, k) { // 如果tophash相等的话，检查key是否相等，tophash相等，key不相等也代表不存在
 				continue
 			}
 			// already have a mapping for key. Update it.
