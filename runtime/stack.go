@@ -79,7 +79,7 @@ const (
 	_FixedStack4 = _FixedStack3 | (_FixedStack3 >> 4)
 	_FixedStack5 = _FixedStack4 | (_FixedStack4 >> 8)
 	_FixedStack6 = _FixedStack5 | (_FixedStack5 >> 16)
-	_FixedStack  = _FixedStack6 + 1
+	_FixedStack  = _FixedStack6 + 1 // linux下 _FixedStack == 2048
 
 	// Functions that need frames bigger than this use an extra
 	// instruction to do the stack split check, to avoid overflow
@@ -138,16 +138,17 @@ const (
 //     order = log_2(size/FixedStack)
 // There is a free list for each order.
 // TODO: one lock per order?
-var stackpool [_NumStackOrders]mSpanList // 有空闲stack的全局小栈缓存池.该变量里缓存了4个档位的栈缓存链表:2048/4096/8192/16384
-var stackpoolmu mutex
+var stackpool [_NumStackOrders]mSpanList // 全局小栈缓存池.该变量里缓存了4个档位的栈缓存链表:2048/4096/8192/16384
+var stackpoolmu mutex                    // 全局小栈缓存池的锁
 
 // Global pool of large stack spans.
-// 全局大栈的栈缓存池
+// 全局大栈缓存池
 var stackLarge struct {
 	lock mutex
 	free [heapAddrBits - pageShift]mSpanList // 数组里的索引是page //free lists by log_2(s.npages)
 }
 
+// 初始化全局小栈缓存池和全局大栈缓存池
 func stackinit() {
 	if _StackCacheSize&_PageMask != 0 {
 		throw("cache size must be a multiple of page size")
@@ -172,8 +173,8 @@ func stacklog2(n uintptr) int {
 
 // Allocates a stack from the free pool. Must be called with
 // stackpoolmu held.
-// 从全局空闲stack池里分配一块stack
-// 如果全局空闲stack池里没有数据了，则从mheap里分配一块mspan，因此实质栈内存的来源还是mheap
+// 从全局小栈缓存池分配一块stack
+// 如果全局小栈缓存池没有空闲了，则从mheap里分配一块mspan.(因此实质栈内存的来源是mheap)
 func stackpoolalloc(order uint8) gclinkptr {
 	list := &stackpool[order]
 	s := list.first
@@ -212,7 +213,8 @@ func stackpoolalloc(order uint8) gclinkptr {
 }
 
 // Adds stack x to the free pool. Must be called with stackpoolmu held.
-// 返还栈给全局栈缓存池里
+// 返还栈给全局小栈(<32KB)缓存池里
+// 如果栈没有被使用的了，且在GC清理阶段，则直接返还给mheap
 func stackpoolfree(x gclinkptr, order uint8) {
 	s := spanOfUnchecked(uintptr(x))
 	if s.state != mSpanManual {
@@ -225,7 +227,7 @@ func stackpoolfree(x gclinkptr, order uint8) {
 	x.ptr().next = s.manualFreeList
 	s.manualFreeList = x
 	s.allocCount--
-	if gcphase == _GCoff && s.allocCount == 0 { // 如果全部空闲栈了，且在GC清理阶段，则直接返还给mheap
+	if gcphase == _GCoff && s.allocCount == 0 { // 如果栈没有被使用的了，且在GC清理阶段，则直接返还给mheap
 		// Span is completely free. Return it to the heap
 		// immediately if we're sweeping.
 		//
@@ -244,14 +246,14 @@ func stackpoolfree(x gclinkptr, order uint8) {
 		stackpool[order].remove(s)
 		s.manualFreeList = 0
 		osStackFree(s)
-		mheap_.freeManual(s, &memstats.stacks_inuse)
+		mheap_.freeManual(s, &memstats.stacks_inuse) // 返还给mheap
 	}
 }
 
 // stackcacherefill/stackcacherelease implement a global pool of stack segments.
 // The pool is required to prevent unlimited growth of per-thread caches.
 //
-// 从全局空闲stack池里填充到mcache本地的stack缓存里
+// 从全局小栈缓存池里填充到mcache本地的stack缓存里
 //go:systemstack
 func stackcacherefill(c *mcache, order uint8) {
 	if stackDebug >= 1 {
@@ -264,7 +266,7 @@ func stackcacherefill(c *mcache, order uint8) {
 	var size uintptr
 	lock(&stackpoolmu)
 	for size < _StackCacheSize/2 {
-		x := stackpoolalloc(order)
+		x := stackpoolalloc(order) // 从全局大栈缓存池分配一块stack
 		x.ptr().next = list
 		list = x
 		size += _FixedStack << order
@@ -274,7 +276,7 @@ func stackcacherefill(c *mcache, order uint8) {
 	c.stackcache[order].size = size
 }
 
-// 返还给mcache本地的栈缓存池，如果过多了则返还给全局
+// 把mcache本地缓存栈里多出来的(超过16KB的部分)缓存给全局小栈缓存池
 //go:systemstack
 func stackcacherelease(c *mcache, order uint8) {
 	if stackDebug >= 1 {
@@ -283,17 +285,18 @@ func stackcacherelease(c *mcache, order uint8) {
 	x := c.stackcache[order].list
 	size := c.stackcache[order].size
 	lock(&stackpoolmu)
-	for size > _StackCacheSize/2 {
+	for size > _StackCacheSize/2 { // 切分成等块大小返还给全局小栈缓存池
 		y := x.ptr().next
 		stackpoolfree(x, order)
 		x = y
-		size -= _FixedStack << order
+		size -= _FixedStack << order // linux下_FixedStack == 2048
 	}
 	unlock(&stackpoolmu)
 	c.stackcache[order].list = x
 	c.stackcache[order].size = size
 }
 
+// 遍历清理mcache下本地所有的栈缓存
 //go:systemstack
 func stackcache_clear(c *mcache) {
 	if stackDebug >= 1 {
@@ -318,7 +321,7 @@ func stackcache_clear(c *mcache) {
 // stackalloc must run on the system stack because it uses per-P
 // resources and must not split the stack.
 //
-// 分配n个字节的栈空间
+// 分配栈内存的入口方法，分配n个字节的栈空间
 // 创建G时给G分配栈空间时调用该方法
 //go:systemstack
 func stackalloc(n uint32) stack {
@@ -360,43 +363,43 @@ func stackalloc(n uint32) stack {
 		}
 		var x gclinkptr
 		c := thisg.m.mcache
-		if stackNoCache != 0 || c == nil || thisg.m.preemptoff != "" {
+		if stackNoCache != 0 || c == nil || thisg.m.preemptoff != "" { // 从全局小栈缓存池分配stack
 			// c == nil can happen in the guts of exitsyscall or
 			// procresize. Just get a stack from the global pool.
 			// Also don't touch stackcache during gc
 			// as it's flushed concurrently.
 			// stackNoCache != 0 默认不会发生，写死代码了
 			// c == nil是在exitsyscall()或者procresize()的时候发生
-			// GC期间不能碰触stackcache，因此需要通过stackpoolalloc分配栈
+			// GC期间不能碰触c.stackcache，因此需要通过stackpoolalloc分配栈
 			lock(&stackpoolmu)
-			x = stackpoolalloc(order) // 从全局stack池里分配stack，因为是全局池，因此需要加全局锁
+			x = stackpoolalloc(order) // 从全局小栈缓存池里分配stack
 			unlock(&stackpoolmu)
-		} else { // 从mcache本地的stack缓存链表里里分配stack
+		} else { // 从mcache本地的stack缓存链表里分配stack
 			x = c.stackcache[order].list
-			if x.ptr() == nil {
-				stackcacherefill(c, order) // 从全局stack池里填充到mcache本地的stack缓存
+			if x.ptr() == nil { // 如果mcache本地没有缓存栈，则从全局小栈缓存池里填充
+				stackcacherefill(c, order)
 				x = c.stackcache[order].list
 			}
 			c.stackcache[order].list = x.ptr().next
 			c.stackcache[order].size -= uintptr(n)
 		}
 		v = unsafe.Pointer(x)
-	} else { // 如果n>=32KB,从全局变量stackLarge里获取空闲stack,没有的话，则从mheap里分配
+	} else { // 如果n>=32KB,从全局大栈缓存池获取空闲stack,没有的话，则从mheap里分配
 		var s *mspan
 		npage := uintptr(n) >> _PageShift
 		log2npage := stacklog2(npage)
 
 		// Try to get a stack from the large stack cache.
 		lock(&stackLarge.lock)
-		if !stackLarge.free[log2npage].isEmpty() { //从全局变量stackLarge里获取空闲stack
+		if !stackLarge.free[log2npage].isEmpty() { //从全局大栈缓存池里获取空闲stack
 			s = stackLarge.free[log2npage].first
 			stackLarge.free[log2npage].remove(s)
 		}
 		unlock(&stackLarge.lock)
 
-		if s == nil {
+		if s == nil { // 如果全局大栈缓存池没有空闲stack,则从mheap里分配
 			// Allocate a new stack from the heap.
-			s = mheap_.allocManual(npage, &memstats.stacks_inuse) // 没有空闲stack缓存则从mheap里分配
+			s = mheap_.allocManual(npage, &memstats.stacks_inuse)
 			if s == nil {
 				throw("out of memory")
 			}
@@ -423,7 +426,8 @@ func stackalloc(n uint32) stack {
 // stackfree must run on the system stack because it uses per-P
 // resources and must not split the stack.
 //
-// 释放指定的栈
+// 释放栈空间的入口方法。
+// 释放指定的栈。
 //go:systemstack
 func stackfree(stk stack) {
 	gp := getg()
@@ -450,7 +454,7 @@ func stackfree(stk stack) {
 	if msanenabled {
 		msanfree(v, n)
 	}
-	if n < _FixedStack<<_NumStackOrders && n < _StackCacheSize { // 如果是小栈(<32KB),则放到mcache本地stack缓存里或者放到全局stack缓存里
+	if n < _FixedStack<<_NumStackOrders && n < _StackCacheSize { // 如果是小栈(<32KB),则放到mcache本地stack缓存里或者放到全局小栈缓存池
 		order := uint8(0)
 		n2 := n
 		for n2 > _FixedStack {
@@ -459,19 +463,19 @@ func stackfree(stk stack) {
 		}
 		x := gclinkptr(v)
 		c := gp.m.mcache
-		if stackNoCache != 0 || c == nil || gp.m.preemptoff != "" {
+		if stackNoCache != 0 || c == nil || gp.m.preemptoff != "" { // 如果GC阶段不允许碰触c.stackcache，因此直接返还给全局小栈缓存池
 			lock(&stackpoolmu)
-			stackpoolfree(x, order)
+			stackpoolfree(x, order) // 返还给全局小栈缓存池
 			unlock(&stackpoolmu)
-		} else {
-			if c.stackcache[order].size >= _StackCacheSize {
+		} else { // 返还给mcache本地stack缓存池
+			if c.stackcache[order].size >= _StackCacheSize { // 如果mcache本地stack缓存池总大小>=32KB,则把多出来的部分(>16KB的部分)返还给全局小栈缓存池。剩下的继续保存在
 				stackcacherelease(c, order)
 			}
 			x.ptr().next = c.stackcache[order].list
 			c.stackcache[order].list = x
 			c.stackcache[order].size += n
 		}
-	} else { // 如果是大栈(>=32KB),
+	} else { // 如果是大栈(>=32KB),则直接返还给全局大栈缓存池或mheap
 		s := spanOfUnchecked(uintptr(v))
 		if s.state != mSpanManual {
 			println(hex(s.base()), v)
@@ -481,8 +485,8 @@ func stackfree(stk stack) {
 			// Free the stack immediately if we're
 			// sweeping.
 			osStackFree(s)
-			mheap_.freeManual(s, &memstats.stacks_inuse)
-		} else { // 否则返还给全局stackLarge缓存里
+			mheap_.freeManual(s, &memstats.stacks_inuse) // 返还给mheap
+		} else { // 否则返还给全局大栈缓存池
 			// If the GC is running, we can't return a
 			// stack span to the heap because it could be
 			// reused as a heap span, and this state
@@ -830,7 +834,7 @@ func syncadjustsudogs(gp *g, used uintptr, adjinfo *adjustinfo) uintptr {
 // particular, no other G may be writing to gp's stack (e.g., via a
 // channel operation). If sync is false, copystack protects against
 // concurrent channel operations.
-// copy G的栈到一个新栈上
+// copy G的栈到一个新栈上，并释放掉老的栈
 func copystack(gp *g, newsize uintptr, sync bool) {
 	if gp.syscallsp != 0 {
 		throw("stack growth not allowed in system call")
@@ -1057,7 +1061,7 @@ func newstack() {
 	}
 
 	// Allocate a bigger segment and move the stack.
-	// 分配一个更大的段，迁移过去，新栈大小是老的2倍
+	// 分配一个更大的栈，迁移过去，新栈大小是老的2倍
 	oldsize := gp.stack.hi - gp.stack.lo
 	newsize := oldsize * 2
 	if newsize > maxstacksize {
@@ -1099,9 +1103,12 @@ func gostartcallfn(gobuf *gobuf, fv *funcval) {
 // Maybe shrink the stack being used by gp.
 // Called at garbage collection time.
 // gp must be stopped, but the world need not be.
+// 栈缩容入口方法
+// 只有在GC期间才会被掉用
+// gp一定是停止运行的，但是不一定是在STW时期
 func shrinkstack(gp *g) {
 	gstatus := readgstatus(gp)
-	if gstatus&^_Gscan == _Gdead {
+	if gstatus&^_Gscan == _Gdead { // 如果已经是无用的G了，则直接释放
 		if gp.stack.lo != 0 {
 			// Free whole stack - it will get reallocated
 			// if G is used again.
@@ -1162,11 +1169,13 @@ func shrinkstack(gp *g) {
 }
 
 // freeStackSpans frees unused stack spans at the end of GC.
+// 释放已经没有在使用的mspan，返还给mheap
+// GC循环的结束时执行该方法
 func freeStackSpans() {
 	lock(&stackpoolmu)
 
 	// Scan stack pools for empty stack spans.
-	for order := range stackpool {
+	for order := range stackpool { // 遍历全局小栈缓存池,返还给mheap
 		list := &stackpool[order]
 		for s := list.first; s != nil; {
 			next := s.next
@@ -1174,7 +1183,7 @@ func freeStackSpans() {
 				list.remove(s)
 				s.manualFreeList = 0
 				osStackFree(s)
-				mheap_.freeManual(s, &memstats.stacks_inuse)
+				mheap_.freeManual(s, &memstats.stacks_inuse) // 返还给mheap
 			}
 			s = next
 		}
@@ -1184,12 +1193,12 @@ func freeStackSpans() {
 
 	// Free large stack spans.
 	lock(&stackLarge.lock)
-	for i := range stackLarge.free {
+	for i := range stackLarge.free { // 遍历全局大栈缓存池,返还给mheap
 		for s := stackLarge.free[i].first; s != nil; {
 			next := s.next
 			stackLarge.free[i].remove(s)
 			osStackFree(s)
-			mheap_.freeManual(s, &memstats.stacks_inuse)
+			mheap_.freeManual(s, &memstats.stacks_inuse) // 返还给mheap
 			s = next
 		}
 	}
