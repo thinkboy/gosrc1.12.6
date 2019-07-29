@@ -137,7 +137,7 @@ func (m *Mutex) Lock() {
 			if waitStartTime == 0 {
 				waitStartTime = runtime_nanotime()
 			}
-			runtime_SemacquireMutex(&m.sema, queueLifo)                                     // 这里会再次自璇几次,然后最后切换到g0把G标记_Gwaiting状态阻塞在这里
+			runtime_SemacquireMutex(&m.sema, queueLifo)                                     // 这里会再次自璇几次,最后切换到g0把G标记_Gwaiting状态阻塞在这里
 			starving = starving || runtime_nanotime()-waitStartTime > starvationThresholdNs // 如果锁等了1毫秒才被唤醒，才会标记为饥饿模式
 			old = m.state
 			if old&mutexStarving != 0 {
