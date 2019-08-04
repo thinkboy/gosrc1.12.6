@@ -435,6 +435,7 @@ func netpollunblock(pd *pollDesc, mode int32, ioready bool) *g {
 	}
 }
 
+// tcp readDeadline或writeDeadline后被唤醒的实现
 func netpolldeadlineimpl(pd *pollDesc, seq uintptr, read, write bool) {
 	lock(&pd.lock)
 	// Seq arg is seq when the timer was set.

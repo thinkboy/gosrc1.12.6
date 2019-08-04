@@ -63,11 +63,14 @@ func (fd *netFD) name() string {
 	return fd.net + ":" + ls + "->" + rs
 }
 
+// client端调用该方法
+// 初始化poll.FD
+// 系统调用SYS_CONNECT方法向远端发送建立连接指令
 func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa syscall.Sockaddr, ret error) {
 	// Do not need to call fd.writeLock here,
 	// because fd is not yet accessible to user,
 	// so no concurrent operations are possible.
-	switch err := connectFunc(fd.pfd.Sysfd, ra); err {
+	switch err := connectFunc(fd.pfd.Sysfd, ra); err { // 系统调用SYS_CONNECT方法向远端发送连接指令
 	case syscall.EINPROGRESS, syscall.EALREADY, syscall.EINTR:
 	case nil, syscall.EISCONN:
 		select {
@@ -75,7 +78,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 			return nil, mapErr(ctx.Err())
 		default:
 		}
-		if err := fd.pfd.Init(fd.net, true); err != nil {
+		if err := fd.pfd.Init(fd.net, true); err != nil { // 初始化poll.FD
 			return nil, err
 		}
 		runtime.KeepAlive(fd)
@@ -93,7 +96,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 	default:
 		return nil, os.NewSyscallError("connect", err)
 	}
-	if err := fd.pfd.Init(fd.net, true); err != nil {
+	if err := fd.pfd.Init(fd.net, true); err != nil { // 初始化poll.FD
 		return nil, err
 	}
 	if deadline, _ := ctx.Deadline(); !deadline.IsZero() {

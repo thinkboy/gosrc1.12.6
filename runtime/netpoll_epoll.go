@@ -22,7 +22,7 @@ var (
 	epfd int32 = -1 // epoll descriptor
 )
 
-// 内核epoll_create方法创建epoll
+// 内核epoll_create方法创建epoll句柄
 func netpollinit() {
 	epfd = epollcreate1(_EPOLL_CLOEXEC) // epfd保存epoll句柄
 	if epfd >= 0 {

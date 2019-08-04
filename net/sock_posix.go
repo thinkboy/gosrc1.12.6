@@ -51,15 +51,15 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 	// raddr is nil. Otherwise we assume it's just for dialers or
 	// the other connection holders.
 
-	if laddr != nil && raddr == nil {
+	if laddr != nil && raddr == nil { // 如果是server端
 		switch sotype {
-		case syscall.SOCK_STREAM, syscall.SOCK_SEQPACKET:
+		case syscall.SOCK_STREAM, syscall.SOCK_SEQPACKET: // TCP模式
 			if err := fd.listenStream(laddr, listenerBacklog(), ctrlFn); err != nil {
 				fd.Close()
 				return nil, err
 			}
 			return fd, nil
-		case syscall.SOCK_DGRAM:
+		case syscall.SOCK_DGRAM: // UDP模式
 			if err := fd.listenDatagram(laddr, ctrlFn); err != nil {
 				fd.Close()
 				return nil, err
@@ -67,7 +67,10 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 			return fd, nil
 		}
 	}
-	if err := fd.dial(ctx, laddr, raddr, ctrlFn); err != nil { // 对于监听服务，在里面会初始化netFD
+	// client端初始化netFD、poll.FD
+	// 绑定本地端口
+	// client端向远端发送建立连接connect指令
+	if err := fd.dial(ctx, laddr, raddr, ctrlFn); err != nil {
 		fd.Close()
 		return nil, err
 	}
@@ -113,6 +116,10 @@ func (fd *netFD) addrFunc() func(syscall.Sockaddr) Addr {
 	return func(syscall.Sockaddr) Addr { return nil }
 }
 
+// client端都会调用该接口
+// 初始化netFD、poll.FD
+// 绑定本地端口
+// client端向远端发送建立连接指令
 func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlFn func(string, string, syscall.RawConn) error) error {
 	if ctrlFn != nil {
 		c, err := newRawConn(fd)
@@ -135,22 +142,22 @@ func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlFn func(st
 		if lsa, err = laddr.sockaddr(fd.family); err != nil {
 			return err
 		} else if lsa != nil {
-			if err = syscall.Bind(fd.pfd.Sysfd, lsa); err != nil {
+			if err = syscall.Bind(fd.pfd.Sysfd, lsa); err != nil { // 绑定本地端口
 				return os.NewSyscallError("bind", err)
 			}
 		}
 	}
 	var rsa syscall.Sockaddr  // remote address from the user
 	var crsa syscall.Sockaddr // remote address we actually connected to
-	if raddr != nil {
+	if raddr != nil {         // client端建立连接、始化netFD、poll.FD
 		if rsa, err = raddr.sockaddr(fd.family); err != nil {
 			return err
 		}
-		if crsa, err = fd.connect(ctx, lsa, rsa); err != nil {
+		if crsa, err = fd.connect(ctx, lsa, rsa); err != nil { // 向远端发送建立连接指令
 			return err
 		}
 		fd.isConnected = true
-	} else { // raddr==nil说明是监听一个地址，在这里初始化netFD
+	} else { // server端直接初始化netFD、poll.FD
 		if err := fd.init(); err != nil {
 			return err
 		}
