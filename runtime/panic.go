@@ -642,6 +642,8 @@ var paniclk mutex
 // Unwind the stack after a deferred function calls recover
 // after a panic. Then arrange to continue running as though
 // the caller of the deferred function returned normally.
+// recover的实现
+// 恢复当前G的执行环境，继续执行当前G的执行环境。
 func recovery(gp *g) {
 	// Info about defer passed in G struct.
 	sp := gp.sigcode0
