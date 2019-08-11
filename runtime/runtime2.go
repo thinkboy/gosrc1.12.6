@@ -350,7 +350,7 @@ type g struct {
 	stackguard1 uintptr // offset known to liblink
 
 	_panic         *_panic // innermost panic - offset known to liblink
-	_defer         *_defer // innermost defer
+	_defer         *_defer // 当前G下的defer的函数的链表(因为可能有多个defer所以是个链表结构) innermost defer
 	m              *m      // current m; offset known to arm liblink
 	sched          gobuf
 	syscallsp      uintptr        // if status==Gsyscall, syscallsp = sched.sp to use during gc

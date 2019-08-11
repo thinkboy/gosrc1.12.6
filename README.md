@@ -6,3 +6,5 @@ go源码阅读笔记,GO1.12.6版本，持续修缮中
 2. [x] map
 3. [x] memory-stack
 4. [x] sync.Mutex
+5. [x] defer
+6. [x] panic+recover
